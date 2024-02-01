@@ -13,6 +13,7 @@ from langchain.memory import ConversationSummaryBufferMemory
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.chains.summarize import load_summarize_chain
 from langchain_community.tools import BaseTool
+from langchain_core.messages.system import SystemMessage
 from pydantic import BaseModel, Field
 from typing import Type
 from bs4 import BeautifulSoup
@@ -35,9 +36,14 @@ from forge.sdk import (
 )
 
 load_dotenv('.env')
-
+browserless_api_key = os.getenv('BROWSERLESS_API_KEY')
+serper_api_key = os.getenv('SERP_API_KEY')
+open_ai_api = os.getenv('OPENAI_API_KEY')
 LOG = ForgeLogger(__name__)
-
+ 
+llm = ChatOpenAI(temperature=0, model='gpt-3.5-turbo-16k-0613')
+memory = ConversationSummaryBufferMemory(
+    memory_key="memory", return_messages=True, llm=llm, max_token_limit=1000)
 
 class ForgeAgent(Agent):
     """
@@ -118,6 +124,33 @@ class ForgeAgent(Agent):
         return task
 
     async def execute_step(self, task_id: str, step_request: StepRequestBody) -> Step:
+        self.workspace.write(task_id=task_id, path="output.txt", data=b"Personal assistant is thinking...")
+        step = await self.db.create_step(
+            task_id=task_id, input=step_request, is_last=True
+        )
+        step_input = 'None'
+        if step.input:
+            step_input = step.input[:19]
+        message = f'	🔄 Step executed: {step.step_id} input: {step_input}'
+        if step.is_last:
+            message = (
+                f'	✅ Final Step completed: {step.step_id} input: {step_input}'
+            )
+
+        LOG.info(message)
+        artifact = await self.db.create_artifact(
+            task_id=task_id,
+            step_id=step.step_id,
+            file_name='output.txt',
+            relative_path='',
+            agent_created=True,
+        )
+        LOG.info(f'Received input for task {task_id}: {step_request.input}')
+        step.output = customstep(step_request.input)
+        return step
+
+'''
+    async def execute_step(self, task_id: str, step_request: StepRequestBody) -> Step:
         """
         For a tutorial on how to add your own logic please see the offical tutorial series:
         https://aiedge.medium.com/autogpt-forge-e3de53cc58ec
@@ -176,11 +209,39 @@ class ForgeAgent(Agent):
         )
 
         return step
+'''
+
+def summary(content):
+    # The agent processes the content and generates a concise summary.
+    llm = ChatOpenAI(temperature=0, model="gpt-3.5-turbo-16k-0613")
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        separators=["\n\n", "\n"], chunk_size=10000, chunk_overlap=500)
+    docs = text_splitter.create_documents([content])
+    map_prompt = """
+    Write a summary of the following text:
+    "{text}"
+    SUMMARY:
+    """
+    map_prompt_template = PromptTemplate(template=map_prompt, input_variables=["text"],)
+
+    summary_chain = load_summarize_chain(
+        llm=llm,
+        chain_type='map_reduce',
+        map_prompt=map_prompt_template,
+        combine_prompt=map_prompt_template,
+        verbose=True
+    )
+
+    output = summary_chain.run(input_documents=docs)
+
+    return output
 
 def textProcessor(filename):
 
     script_dir = os.path.dirname(__file__)
-    file_path = os.path.join(script_dir, filename)
+    folder_path = os.path.join(script_dir, 'documents')
+    file_path = os.path.join(folder_path, filename)
 
 
     #reader
@@ -193,7 +254,7 @@ def textProcessor(filename):
         page = reader.pages[0] 
 
         text = page.extract_text() 
-        text1 = summarizer(text)
+        text1 = summary(text)
         print(text1)
 
     return text
@@ -219,10 +280,106 @@ def summarizer(text):
 
     return summary
 
+def search(query):
+    url = "https://google.serper.dev/search"
+    payload = json.dumps({
+        "q": query
+    })
+    headers = {
+        'X-API-KEY': serper_api_key,
+        'Content-Type': 'application/json'
+    }
+    response = requests.request("POST", url, headers=headers, data=payload)
+    return response.text
+
+#01/02/2024: tHIS IS SUPPOSED TO RECEIVE THE DB CONNECTOR IN THE PARAMETERS
+def checkDocuments(a):
+    print('This is the argument: ', str(a))
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Specify the folder name
+    folder_name = 'documents'
+    
+    # Construct the full path to the folder
+    folder_path = os.path.join(script_dir, folder_name)
+    
+    # Check if the folder exists
+    if os.path.exists(folder_path) and os.path.isdir(folder_path):
+        # List all files in the folder
+        documents = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
+        
+        # Print or return the list of documents
+        return documents
+    else:
+        print(f"The folder '{folder_name}' does not exist.")
+        return None
+
+def scrape_website(url):
+    # The agent would access the given URL and extract the necessary data.
+    headers = {
+        'Cache-Control': 'no-cache',
+        'Content-Type': 'application/json',
+    }
+
+    # Define the data to be sent in the request
+    data = {
+        "url": url
+    }
+
+    # Convert Python object to JSON string
+    data_json = json.dumps(data)
+
+    # Send the POST request
+    post_url = f"https://chrome.browserless.io/content?token={browserless_api_key}"
+    response = requests.post(post_url, headers=headers, data=data_json)
+
+    # Check the response status code
+    if response.status_code == 200:
+        soup = BeautifulSoup(response.content, "html.parser")
+        text = soup.get_text()
+        print("CONTENTTTTTT:", text)
+
+        if len(text) > 10000:
+            output = summary(objective, text)
+            return output
+        else:
+            return text
+    else:
+        print(f"HTTP request failed with status code {response.status_code}")
+
 tools = [
+    Tool(
+        name="CheckDocuments",
+        func=checkDocuments,
+        description="Lists the files located in the documents folder"
+    ),
     Tool(
         name="Summarize",
         func=textProcessor,
-        description="useful for when you need to answer questions about current events, data. You should ask targeted questions"
+        description="Summarizes the file of the document folder chosen by the user, even if the user doest give the exact name of the file, and answer questions about such files and only those files"
     ),
 ]
+
+system_message = SystemMessage(
+    content="""You are a personal assistant, and you should be able to give data about the files stored in the folder documents. Please always take in mind the file format
+            
+            """
+)
+
+agent_kwargs = {
+    "extra_prompt_messages": [MessagesPlaceholder(variable_name="memory")],
+    "system_message": system_message,
+}
+
+agent = initialize_agent(
+    tools,
+    llm,
+    agent=AgentType.OPENAI_FUNCTIONS,
+    verbose=True,
+    agent_kwargs=agent_kwargs,
+    memory=memory,
+)
+
+def customstep(query):
+    result = agent({"input": query})
+    return result['output']
