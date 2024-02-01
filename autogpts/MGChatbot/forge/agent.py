@@ -19,6 +19,7 @@ from typing import Type
 from bs4 import BeautifulSoup
 import requests
 import json
+#from langchain_community.schema import SystemMessage
 LOG = ForgeLogger(__name__)
 from forge.actions import ActionRegister
 from forge.sdk import (
@@ -123,7 +124,7 @@ class ForgeAgent(Agent):
         return task
 
     async def execute_step(self, task_id: str, step_request: StepRequestBody) -> Step:
-        self.workspace.write(task_id=task_id, path="output.txt", data=b"Research Agent is thinking...")
+        self.workspace.write(task_id=task_id, path="output.txt", data=b"Personal assistant is thinking...")
         step = await self.db.create_step(
             task_id=task_id, input=step_request, is_last=True
         )
@@ -218,12 +219,11 @@ def summary(content):
         separators=["\n\n", "\n"], chunk_size=10000, chunk_overlap=500)
     docs = text_splitter.create_documents([content])
     map_prompt = """
-    Write a summary of the following text for {objective}:
+    Write a summary of the following text:
     "{text}"
     SUMMARY:
     """
-    map_prompt_template = PromptTemplate(
-        template=map_prompt, input_variables=["text", "objective"])
+    map_prompt_template = PromptTemplate(template=map_prompt, input_variables=["text"],)
 
     summary_chain = load_summarize_chain(
         llm=llm,
@@ -233,14 +233,15 @@ def summary(content):
         verbose=True
     )
 
-    output = summary_chain.run(input_documents=docs, objective=objective)
+    output = summary_chain.run(input_documents=docs)
 
     return output
 
 def textProcessor(filename):
 
     script_dir = os.path.dirname(__file__)
-    file_path = os.path.join(script_dir, filename)
+    folder_path = os.path.join(script_dir, 'documents')
+    file_path = os.path.join(folder_path, filename)
 
 
     #reader
@@ -253,7 +254,7 @@ def textProcessor(filename):
         page = reader.pages[0] 
 
         text = page.extract_text() 
-        text1 = summarizer(text)
+        text1 = summary(text)
         print(text1)
 
     return text
@@ -291,6 +292,28 @@ def search(query):
     response = requests.request("POST", url, headers=headers, data=payload)
     return response.text
 
+#01/02/2024: tHIS IS SUPPOSED TO RECEIVE THE DB CONNECTOR IN THE PARAMETERS
+def checkDocuments(a):
+    print('This is the argument: ', str(a))
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Specify the folder name
+    folder_name = 'documents'
+    
+    # Construct the full path to the folder
+    folder_path = os.path.join(script_dir, folder_name)
+    
+    # Check if the folder exists
+    if os.path.exists(folder_path) and os.path.isdir(folder_path):
+        # List all files in the folder
+        documents = [f for f in os.listdir(folder_path) if os.path.isfile(os.path.join(folder_path, f))]
+        
+        # Print or return the list of documents
+        return documents
+    else:
+        print(f"The folder '{folder_name}' does not exist.")
+        return None
+
 def scrape_website(url):
     # The agent would access the given URL and extract the necessary data.
     headers = {
@@ -326,22 +349,20 @@ def scrape_website(url):
 
 tools = [
     Tool(
-        name="Search",
-        func=search,
-        description="useful for when you need to answer questions about current events, data. You should ask targeted questions"
+        name="CheckDocuments",
+        func=checkDocuments,
+        description="Lists the files located in the documents folder"
     ),
     Tool(
-        name="ScrapeWebsite",
-        func=scrape_website,
-        description="Scrape content from a website"
+        name="Summarize",
+        func=textProcessor,
+        description="Summarizes the file of the document folder chosen by the user, even if the user doest give the exact name of the file, and answer questions about such files and only those files"
     ),
 ]
 
 system_message = SystemMessage(
-    content="""You are a world class researcher, who can do detailed research on any topic and produce facts based results; 
-            you do not make things up, you will try as hard as possible to gather facts & data to back up the research
-            ...
-            (include other rules and guidelines here)
+    content="""You are a personal assistant, and you should be able to give data about the files stored in the folder documents. Please always take in mind the file format
+            
             """
 )
 
